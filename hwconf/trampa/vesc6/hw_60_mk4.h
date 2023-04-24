@@ -22,6 +22,11 @@
 
 #define HW60_IS_MK4
 
+//#define V_REG						(1.21 / ((float)ADC_Value[ADC_IND_VREFINT] / 4095.0))
+//#define V_REG						2.75
+#define V_REG						2.75
+#define CURRENT_AMP_GAIN		50.0
+//#define CURRENT_SHUNT_RES		0.0005
 #include "hw_60_core.h"
 
 #endif /* HW_60_MK4_H_ */

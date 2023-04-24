@@ -44,7 +44,7 @@
 #define HW_MINOR				0
 
 // HW properties
-#define HW_HAS_DRV8301
+//#define HW_HAS_DRV8301
 #define HW_HAS_3_SHUNTS
 #define HW_HAS_PHASE_SHUNTS
 #if !defined(HW60_IS_MK3) && !defined(HW60_IS_MK4) && !defined(HW60_IS_MK5) && !defined(HW60_IS_MK6)

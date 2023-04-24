@@ -101,7 +101,7 @@ static status_msg_wrapper_t stat_msgs[STATUS_MSGS_TO_STORE];
 static bool refresh_parameters_enabled = true;
 
 // Threads
-static THD_WORKING_AREA(canard_thread_wa, 1024);
+static THD_WORKING_AREA(canard_thread_wa, 1536);
 static THD_FUNCTION(canard_thread, arg);
 
 // Private functions
@@ -222,7 +222,8 @@ static param_t parameters[] =
 	{"can_status_msgs_r2",	AP_PARAM_INT16,  0,   0,   255,   0},
 	{"can_esc_index",   	AP_PARAM_INT16,  0,   0, 255,   0},
 	{"controller_id",   	AP_PARAM_INT16,  0,   0, 253,   0},
-	{"ctl_dir",         	AP_PARAM_INT8,   0,   0, 1,     0}
+	{"ctl_dir",         	AP_PARAM_INT8,   0,   0, 1,     0},
+	{"can_mode",         	AP_PARAM_INT8,   0,   0, 3,     0}
 };
 
 /*
@@ -266,6 +267,7 @@ static void write_app_config(void) {
 	appconf->uavcan_esc_index = (uint16_t)getParamByName("can_esc_index")->val;
 	appconf->controller_id = (uint16_t)getParamByName("controller_id")->val;
 	mcconf->m_invert_direction = (uint8_t)getParamByName("ctl_dir")->val;;
+	appconf->can_mode = (uint8_t)getParamByName("can_mode")->val;;
 
    	conf_general_store_app_configuration(appconf);
    	app_set_configuration(appconf);
@@ -297,6 +299,7 @@ static void refresh_parameters(void){
 	updateParamByName((uint8_t *)"can_esc_index",   	appconf->uavcan_esc_index);
 	updateParamByName((uint8_t *)"controller_id",   	appconf->controller_id);
 	updateParamByName((uint8_t *)"ctl_dir",			   	mcconf->m_invert_direction);
+	updateParamByName((uint8_t *)"can_mode",			   	appconf->can_mode);
 }
 
 /*
@@ -970,6 +973,9 @@ static void send_fw_read(CanardInstance *ins)
 	}
 	uint32_t total_size = (offset+7)/8;
 
+	if (debug_level == 8) {
+		commands_printf("get next! new offset: 0x%.5X", (uint32_t)fw_update.ofs);
+	}
 	canardRequestOrRespond(ins,
 						   fw_update.node_id,
 						   UAVCAN_PROTOCOL_FILE_READ_SIGNATURE,
@@ -987,7 +993,7 @@ static void send_fw_read(CanardInstance *ins)
  * error that needs to be removed before reading the file chunk
  */
 static void handle_file_read_response(CanardInstance* ins, CanardRxTransfer* transfer) {
-	(void)ins;
+	 (void)ins;
 
 	if ((transfer->transfer_id+1)%256 != fw_update.transfer_id ||
 		transfer->source_node_id != fw_update.node_id) {
@@ -1004,21 +1010,50 @@ static void handle_file_read_response(CanardInstance* ins, CanardRxTransfer* tra
 		canardDecodeScalar(transfer, offset, 8, false, (void*)&buf[i]);
 		offset += 8;
 	}
-
+		
 	if (debug_level == 9) {
 		commands_printf("UAVCAN read_response\nlen: %d\noffset: %d",len, fw_update.ofs);
 	}
 
 	if (nrf_driver_ext_nrf_running()) {
 		nrf_driver_pause(2000);
-	}
+	} 
 
 	// Write to flash, skip the first 6 bytes for Size and CRC so need to add 6 always
-	uint16_t flash_res = flash_helper_write_new_app_data(fw_update.ofs+6, buf, len);
+	if (fw_update.ofs == 0){
+		int32_t ind1 =0;
+		uint32_t sizeA = buffer_get_uint32(buf,&ind1) &0x00FFFFFF;
+		if (debug_level == 8) {
+			commands_printf("size 0x%.8X", sizeA);
+		}
+		if (sizeA > 393216){
+			commands_printf("size too big 0x%.8X abort", sizeA);
+			fw_update.node_id = 0;
+			return;
+		}
+	}
+	uint16_t flash_res = flash_helper_write_new_app_data(fw_update.ofs, buf, len);
+	uint32_t* ptr = (uint32_t)ADDR_FLASH_SECTOR_8 + (uint32_t)fw_update.ofs;
+	//commands_printf("0x%.8X - 0x%.8X",ptr,*ptr); 
+	for (uint16_t i=0; i<sizeof(buf32)/4-1; i++) {
+		if (buf32[i] != *ptr)
+		{
+			commands_printf("0x%.2X mismatch 0x%.8X != 0x%.8X on address 0x%.8X"
+			,i, buf32[i],*ptr, fw_update.ofs+i+ADDR_FLASH_SECTOR_8); 
+			chThdSleepMilliseconds(2);
+			//uint32_t errorPageId = (uint32_t)fw_update.ofs/0x20000;
+			commands_printf("error at page %d, starting 0x%.8X abort");
+			fw_update.node_id = 0;
+			//erase_sector(flash_addr[ADDR_FLASH_SECTOR_8+errorPageId]);
+			//fw_update.ofs = flash_addr[ADDR_FLASH_SECTOR_8+errorPageId] - ADDR_FLASH_SECTOR_0;
+			return;
+		}
+		ptr++;
+	}
 	fw_update.ofs += len;
-	
+
 	// TODO: Check result and abort on failure.
-	(void)flash_res;
+	(void)flash_res; 
 
 	// If the packet is incomplete that means that was the last packet (might be an issue if the last packet is exactly full)
 	// however Ardupilot seems to be handling this same way, and no issues have been reported so far.
@@ -1035,45 +1070,42 @@ static void handle_file_read_response(CanardInstance* ins, CanardRxTransfer* tra
 
 		// This is debug stuff used to valiate the file transfer.
 		if (debug_level == 8) {
-			commands_printf("UAVCAN read_response transfer finished %d kB", fw_update.ofs / 1024U);
-			commands_printf("new app address: 0x%lx", flash_addr[NEW_APP_BASE]);
+			commands_printf("UAVCAN read_response transfer finished %d kB", (uint32_t)fw_update.ofs / 1024U);
+			commands_printf("new app address: 0x%.8X", flash_addr[NEW_APP_BASE]);
 			
 			// Print reserved space contents for size and crc
 			sizefromflash = buffer_get_uint32((uint8_t *)flash_addr[NEW_APP_BASE], &ind);
 			crc_app = buffer_get_uint16((uint8_t *)flash_addr[NEW_APP_BASE], &ind);
 			nextData = buffer_get_uint32((uint8_t *)flash_addr[NEW_APP_BASE], &ind);
-			commands_printf("orig size from flash: 0x%lx", (long)sizefromflash);
-			commands_printf("orig crc from flash: 0x%02hhX", crc_app);
-			commands_printf("orig nextData: 0x%08lx", (long)nextData);
+			commands_printf("size from flash: 0x%.8X", (long)sizefromflash);
+			commands_printf("crc from flash: 0x%.8X", crc_app);
+			commands_printf("calc crc      : 0x%.8X", app_crc);
+			commands_printf("orig nextData: 0x%.8X", (long)nextData);
 		}
 
 		// Calculate and write size and crc to start of reserved space
 		ind = 0;
-		buffer_append_uint32(sizecrc, app_size, &ind);
-		buffer_append_uint16(sizecrc, app_crc, &ind);
-
-		flash_res = flash_helper_write_new_app_data(0, sizecrc, sizeof(sizecrc));
-
+		
 		if (debug_level == 8) {
 			// Print data for debuging
 			commands_printf("ofs: %ld", (long)fw_update.ofs);
 			commands_printf("len: %d", len);
-			commands_printf("Size: 0x%lx", (long)app_size);
-			commands_printf("crc16: 0x%02hhX", app_crc);
-			uint16_t app_crc1 = crc16((uint8_t *)flash_addr[APP_BASE],app_size);
-			commands_printf("app crc16: 0x%02hhX", app_crc1);
+			commands_printf("Size: 0x%.8X", (long)app_size);
+			commands_printf("crc16: 0x%.8X", app_crc);
+			uint16_t app_crc1 = crc16((uint8_t *)(flash_addr[APP_BASE]+6),app_size);
+			commands_printf("app crc16: 0x%.8X", app_crc1);
 			
 			// Print size and crc data read from flash after calculation and write
 			ind = 0;
 			sizefromflash = buffer_get_uint32((uint8_t *)flash_addr[NEW_APP_BASE], &ind);
 			crc_app = buffer_get_uint16((uint8_t *)flash_addr[NEW_APP_BASE], &ind);
-			commands_printf("size from flash: 0x%lx", (long)sizefromflash);
-			commands_printf("crc from flash: 0x%02hhX", crc_app);
+			commands_printf("size from flash: 0x%.8X", (long)sizefromflash);
+			commands_printf("crc from flash: 0x%.8X", crc_app);
 			nextData = buffer_get_uint32((uint8_t *)flash_addr[NEW_APP_BASE], &ind);
-			commands_printf("nextData: 0x%lx", (long)nextData);
+			commands_printf("nextData: 0x%.8X", (long)nextData);
 			ind = 0;
 			uint32_t appstartdata = buffer_get_uint32((uint8_t *)flash_addr[APP_BASE], &ind);
-			commands_printf("appStartData: 0x%08lx", appstartdata);
+			commands_printf("appStartData: 0x%.8X", appstartdata);
 			commands_printf("Jumping to Bootloader in 500ms!");
 			jump_delay_start = chVTGetSystemTimeX();
 		}
@@ -1082,7 +1114,7 @@ static void handle_file_read_response(CanardInstance* ins, CanardRxTransfer* tra
 		// to allow other things to finish. Currently it only delays if it needs to print the debug
 		// data.
 		jump_to_bootloader = true;
-	}
+	} 
 
 	// show offset number we are flashing in kbyte as crude progress indicator
 	node_status.vendor_specific_status_code = 1 + (fw_update.ofs / 1024U);

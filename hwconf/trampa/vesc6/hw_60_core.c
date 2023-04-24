@@ -21,7 +21,11 @@
 #include "hal.h"
 #include "stm32f4xx_conf.h"
 #include "utils_math.h"
+
+#ifdef HW_HAS_DRV8301
 #include "drv8301.h"
+#endif
+
 #include "terminal.h"
 #include "commands.h"
 #include "mc_interface.h"
@@ -152,8 +156,10 @@ void hw_init_gpio(void) {
 	DAC->CR |= DAC_CR_EN1;
 	DAC->DHR12R1 = 2047;
 #endif
-
+#ifdef HW_HAS_DRV8301
 	drv8301_init();
+#endif
+	
 
 #if defined(HW60_IS_MK3) || defined(HW60_IS_MK4) || defined(HW60_IS_MK5) || defined(HW60_IS_MK6)
 	terminal_register_command_callback(
