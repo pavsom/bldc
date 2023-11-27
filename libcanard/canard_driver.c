@@ -678,6 +678,7 @@ static void handle_esc_raw_command(CanardInstance* ins, CanardRxTransfer* transf
 #endif
 
 			volatile const app_configuration *conf = app_get_configuration();
+			float min_erpm = mc_interface_get_configuration()->s_pid_min_erpm;
 
 			app_disable_output(100);
 
@@ -699,7 +700,12 @@ static void handle_esc_raw_command(CanardInstance* ins, CanardRxTransfer* transf
 					break;
 
 				case UAVCAN_RAW_MODE_RPM:
-					mc_interface_set_pid_speed(raw_val * conf->uavcan_raw_rpm_max);
+					if ((raw_val < 0.0015) && (raw_val > -0.0015)) {
+						mc_interface_set_pid_speed(0);
+						break;
+					}
+					if (raw_val > 0) mc_interface_set_pid_speed(min_erpm + raw_val * (conf->uavcan_raw_rpm_max - min_erpm));
+					else mc_interface_set_pid_speed(raw_val * (conf->uavcan_raw_rpm_max - min_erpm) - min_erpm);
 					break;
 
 				default:
@@ -1033,7 +1039,7 @@ static void handle_file_read_response(CanardInstance* ins, CanardRxTransfer* tra
 		}
 	}
 	uint16_t flash_res = flash_helper_write_new_app_data(fw_update.ofs, buf, len);
-	uint32_t* ptr = (uint32_t)ADDR_FLASH_SECTOR_8 + (uint32_t)fw_update.ofs;
+	uint32_t* ptr = (uint32_t*)((uint32_t)ADDR_FLASH_SECTOR_8 + (uint32_t)fw_update.ofs);
 	//commands_printf("0x%.8X - 0x%.8X",ptr,*ptr); 
 	for (uint16_t i=0; i<sizeof(buf32)/4-1; i++) {
 		if (buf32[i] != *ptr)
@@ -1061,7 +1067,7 @@ static void handle_file_read_response(CanardInstance* ins, CanardRxTransfer* tra
 		fw_update.node_id = 0;
 		const uint32_t app_size = (uint32_t)fw_update.ofs-6;
 		uint16_t app_crc = crc16((uint8_t *)ADDR_FLASH_SECTOR_8+6,app_size);
-		uint8_t sizecrc[6];
+		//uint8_t sizecrc[6];
 		int32_t ind = 0;
 
 		uint32_t sizefromflash = 0;
@@ -1207,7 +1213,7 @@ static void onTransferReceived(CanardInstance* ins, CanardRxTransfer* transfer) 
 	// }
 
 	switch (transfer->data_type_id) {
-		case UAVCAN_PROTOCOL_GETNODEINFO_ID:
+				case UAVCAN_PROTOCOL_GETNODEINFO_ID:
 			handle_get_node_info(ins, transfer);
 			break;
 
@@ -1227,13 +1233,15 @@ static void onTransferReceived(CanardInstance* ins, CanardRxTransfer* transfer) 
 			if (debug_level > 0) {
 				commands_printf("RestartNode\n");
 			}
-			handle_restart_node();
+			if (transfer->transfer_type != CanardTransferTypeBroadcast){
+				handle_restart_node();
+			}
 			break;
 
 		case UAVCAN_PROTOCOL_PARAM_GETSET_ID:
 			handle_param_getset(ins, transfer);
 			break;
-
+			
 		case UAVCAN_PROTOCOL_FILE_BEGINFIRMWAREUPDATE_ID:
 			handle_begin_firmware_update(ins, transfer);
 			break;
@@ -1306,9 +1314,9 @@ static bool shouldAcceptTransfer(const CanardInstance* ins,
 
 		case UAVCAN_PROTOCOL_FILE_READ_ID:
 			*out_data_type_signature = UAVCAN_PROTOCOL_FILE_READ_SIGNATURE;
-			return true;
-		
-		case UAVCAN_PROTOCOL_FILE_BEGINFIRMWAREUPDATE_ID:
+			return true;		
+			
+			case UAVCAN_PROTOCOL_FILE_BEGINFIRMWAREUPDATE_ID:
 			*out_data_type_signature = UAVCAN_PROTOCOL_FILE_BEGINFIRMWAREUPDATE_SIGNATURE;
 			return true;
 
